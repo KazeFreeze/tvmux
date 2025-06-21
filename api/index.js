@@ -5,7 +5,7 @@
  * It is architected to be stateless and serverless-safe.
  */
 
-import { addonBuilder } from "stremio-addon-sdk";
+import { addonBuilder, serveHTTP } from "stremio-addon-sdk";
 import {
   getFromCache,
   MASTER_CHANNEL_LIST_KEY,
@@ -14,16 +14,15 @@ import {
 
 const CACHE_MAX_AGE = 60 * 5; // 5 minutes in seconds
 
-/**
- * Creates and configures a new Stremio addon instance with dynamic data.
- * @returns {Promise<object>} A promise resolving to a Stremio addon instance.
- */
-async function getAddon() {
+// This function now only builds the addon definition.
+// It will be called once per serverless function invocation.
+const buildAddon = async () => {
   const availableCatalogs = (await getFromCache(AVAILABLE_CATALOGS_KEY)) || [];
+  const masterChannelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
 
   const builder = new addonBuilder({
     id: "com.tvmux.addon",
-    version: "1.0.2", // Bump version to signify this fix
+    version: "1.0.3", // Bump version to signify this fix
     name: "TVMux",
     description: "Resilient IPTV addon sourcing from public and custom lists.",
     resources: ["catalog", "meta", "stream"],
@@ -36,10 +35,7 @@ async function getAddon() {
         extra: [
           {
             name: "genre",
-            options:
-              availableCatalogs.length > 0
-                ? ["All", ...availableCatalogs]
-                : ["All"],
+            options: ["All", ...availableCatalogs],
             isRequired: false,
           },
         ],
@@ -53,21 +49,22 @@ async function getAddon() {
   });
 
   // CATALOG HANDLER
-  builder.defineCatalogHandler(async (args) => {
-    console.log("Catalog request:", args);
-    const { type, id, extra } = args;
+  builder.defineCatalogHandler(async ({ type, id, extra }) => {
+    console.log("Catalog request:", { type, id, extra });
 
     if (type !== "tv" || id !== "tvmux-main-catalog") {
-      return { metas: [] };
+      return Promise.resolve({ metas: [] });
     }
 
-    const masterChannelList =
-      (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
     if (masterChannelList.length === 0) {
-      return { metas: [] };
+      console.log("Master channel list is empty, returning empty catalog.");
+      return Promise.resolve({ metas: [] });
     }
 
     const selectedGenre = extra?.genre;
+
+    // Filter the list based on the selected genre.
+    // A channel matches if its 'source' or 'country.name' matches the genre.
     const filteredList =
       selectedGenre && selectedGenre !== "All"
         ? masterChannelList.filter(
@@ -84,49 +81,48 @@ async function getAddon() {
       posterShape: "square",
     }));
 
-    return { metas };
+    return Promise.resolve({ metas });
   });
 
   // META HANDLER
-  builder.defineMetaHandler(async (args) => {
-    console.log("Meta request for:", args);
-    const { id } = args;
+  builder.defineMetaHandler(async ({ id }) => {
+    console.log("Meta request for:", id);
 
-    const masterChannelList =
-      (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
     const channel = masterChannelList.find((c) => c.id === id);
 
-    if (!channel) return { meta: null };
+    if (!channel) {
+      console.warn(`Could not find meta for id: ${id}`);
+      return Promise.resolve({ meta: null });
+    }
 
-    return {
-      meta: {
-        id: channel.id,
-        type: "tv",
-        name: channel.name,
-        poster: channel.logo,
-        posterShape: "square",
-        logo: channel.logo,
-        background: "https://dl.strem.io/addon-background.jpg",
-        description: `Source: ${channel.source}\nCategories: ${(
-          channel.categories || []
-        ).join(", ")}`,
-      },
+    const meta = {
+      id: channel.id,
+      type: "tv",
+      name: channel.name,
+      poster: channel.logo,
+      posterShape: "square",
+      logo: channel.logo,
+      background: "https://dl.strem.io/addon-background.jpg",
+      description: `Source: ${channel.source}\nCategories: ${(
+        channel.categories || []
+      ).join(", ")}`,
     };
+
+    return Promise.resolve({ meta });
   });
 
   // STREAM HANDLER
-  builder.defineStreamHandler(async (args) => {
-    console.log("Stream request for:", args);
-    const { id } = args;
+  builder.defineStreamHandler(async ({ id }) => {
+    console.log("Stream request for:", id);
 
-    const masterChannelList =
-      (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
     const channel = masterChannelList.find((c) => c.id === id);
 
     if (!channel || !channel.streams || channel.streams.length === 0) {
-      return { streams: [] };
+      console.warn(`No streams found for id: ${id}`);
+      return Promise.resolve({ streams: [] });
     }
 
+    // Sort streams to prioritize verified ones
     const sortedStreams = [...channel.streams].sort((a, b) => {
       if (a.health === "verified" && b.health !== "verified") return -1;
       if (b.health === "verified" && a.health !== "verified") return 1;
@@ -140,6 +136,7 @@ async function getAddon() {
           stream.health === "verified" ? "✅ Verified" : "❔ Untested"
         }`,
       };
+      // Add behavior hints for headers if needed
       if (stream.user_agent || stream.referrer) {
         streamObj.behaviorHints = { headers: {} };
         if (stream.user_agent)
@@ -150,20 +147,24 @@ async function getAddon() {
       return streamObj;
     });
 
-    return { streams };
+    return Promise.resolve({ streams });
   });
 
   return builder.getInterface();
-}
+};
+
+// This is the addonInterface promise that will be resolved once.
+const addonInterfacePromise = buildAddon();
 
 /**
  * The main serverless function handler for Vercel.
+ * This is now greatly simplified by using serveHTTP.
  */
 export default async function handler(req, res) {
+  // Set CORS and cache headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Content-Type", "application/json");
   res.setHeader(
     "Cache-Control",
     `public, max-age=${CACHE_MAX_AGE}, stale-while-revalidate=${
@@ -171,52 +172,17 @@ export default async function handler(req, res) {
     }`
   );
 
+  // Handle pre-flight OPTIONS requests
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const path = url.pathname;
-
-  console.log(`Handling request: ${path}`);
-
-  if (path === "/favicon.ico") {
-    return res.status(204).end();
-  }
-
+  // Forwards the request to the correct handler in the SDK
   try {
-    const addonInterface = await getAddon();
-    let result;
-
-    if (path === "/manifest.json" || path === "/") {
-      result = addonInterface.manifest;
-    } else if (path.startsWith("/catalog/")) {
-      const [, , type, id, extra] = path.replace(".json", "").split("/");
-      result = await addonInterface.catalog.get({
-        type,
-        id,
-        extra: extra ? new URLSearchParams(extra).toString() : null,
-      });
-    } else if (path.startsWith("/meta/")) {
-      const [, , type, id] = path.replace(".json", "").split("/");
-      result = await addonInterface.meta.get({ type, id });
-    } else if (path.startsWith("/stream/")) {
-      const [, , type, id] = path.replace(".json", "").split("/");
-      result = await addonInterface.stream.get({ type, id });
-    } else if (path === "/configure") {
-      res.writeHead(200, { "Content-Type": "text/html" });
-      return res.end(
-        "<h1>Configuration is handled automatically in Stremio.</h1>"
-      );
-    } else {
-      res.writeHead(404);
-      return res.end(JSON.stringify({ error: "Not Found" }));
-    }
-
-    res.writeHead(200);
-    res.end(JSON.stringify(result));
+    const addonInterface = await addonInterfacePromise;
+    serveHTTP(addonInterface, { req, res });
   } catch (err) {
-    console.error("Handler error:", err);
+    console.error("serveHTTP error:", err);
     res.writeHead(500);
     res.end(
       JSON.stringify({ error: "Internal Server Error", detail: err.message })
