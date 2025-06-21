@@ -1,6 +1,7 @@
 {
   "name": "tvmux-stremio-addon",
   "version": "1.0.0",
+  "type": "module",
   "description": "A resilient Stremio IPTV addon based on the TVMUX blueprint.",
   "main": "api/index.js",
   "scripts": {
@@ -8,11 +9,11 @@
     "deploy": "vercel --prod"
   },
   "dependencies": {
-  "@vercel/kv": "^1.0.1",
-  "axios": "^1.6.8",
-  "iptv-playlist-parser": "^0.14.0",
-  "stremio-addon-sdk": "^1.6.10"
-},
+    "@vercel/kv": "^1.0.1",
+    "axios": "^1.6.8",
+    "iptv-playlist-parser": "^0.14.0",
+    "stremio-addon-sdk": "^1.6.10"
+  },
   "devDependencies": {
     "vercel": "^33.5.5"
   }
