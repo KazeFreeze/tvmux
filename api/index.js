@@ -24,7 +24,7 @@ async function getAddon() {
 
   const builder = new addonBuilder({
     id: "com.tvmux.addon",
-    version: "1.0.8", // Bump version to signify the definitive fix
+    version: "1.0.9", // Bump version to signify the definitive fix
     name: "TVMux",
     description: "Resilient IPTV addon sourcing from public and custom lists.",
     resources: ["catalog", "meta", "stream"],
@@ -152,7 +152,7 @@ export default async function handler(req, res) {
     );
     const lightweightManifest = {
       id: "com.tvmux.addon",
-      version: "1.0.8",
+      version: "1.0.9",
       name: "TVMux",
       description:
         "Resilient IPTV addon sourcing from public and custom lists.",
@@ -163,7 +163,8 @@ export default async function handler(req, res) {
           type: "tv",
           id: "tvmux-main-catalog",
           name: "TVMux Channels",
-          // Crucially, the 'extra' property is omitted here for performance.
+          // Restore 'extra' to re-enable the genre search/filter input in Stremio.
+          extra: [{ name: "genre" }],
         },
       ],
       idPrefixes: ["tvmux_"],
@@ -172,6 +173,8 @@ export default async function handler(req, res) {
         configurationRequired: false,
       },
     };
+    // Add the crucial CORS header to allow Stremio to fetch the manifest.
+    res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(lightweightManifest));
     console.log(
