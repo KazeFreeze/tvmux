@@ -9,7 +9,7 @@ import pkg from "stremio-addon-sdk";
 const { addonBuilder, serveHTTP } = pkg;
 import {
   getFromCache,
-  MASTER_CHANNEL_LIST_KEY,
+  MASTER_CHANNEL_LIST_KEY, // Still used for meta/stream lookups
   AVAILABLE_CATALOGS_KEY,
 } from "./_lib/cache.js";
 
@@ -22,7 +22,7 @@ async function getAddon() {
 
   const builder = new addonBuilder({
     id: "com.tvmux.addon",
-    version: "1.0.3", // Bump version to signify this fix
+    version: "1.0.4", // Bump version to signify optimization
     name: "TVMux",
     description: "Resilient IPTV addon sourcing from public and custom lists.",
     resources: ["catalog", "meta", "stream"],
@@ -51,7 +51,7 @@ async function getAddon() {
     },
   });
 
-  // CATALOG HANDLER
+  // CATALOG HANDLER (OPTIMIZED)
   builder.defineCatalogHandler(async (args) => {
     console.log("Catalog request:", args);
     const { type, id, extra } = args;
@@ -60,22 +60,27 @@ async function getAddon() {
       return Promise.resolve({ metas: [] });
     }
 
-    const masterChannelList =
-      (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
-    if (masterChannelList.length === 0) {
+    const selectedGenre = extra?.genre;
+    let channelList = [];
+
+    // If a specific genre is selected, fetch only that pre-filtered list.
+    // This is much faster than loading the entire master list.
+    if (selectedGenre && selectedGenre !== "All") {
+      console.log(`Fetching optimized catalog for genre: ${selectedGenre}`);
+      const cacheKey = `catalog_${selectedGenre}`;
+      channelList = (await getFromCache(cacheKey)) || [];
+    } else {
+      // Fallback to the full list for "All" or default view. This will still be slow.
+      console.log('Fetching master channel list for "All" genre...');
+      channelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+    }
+
+    if (channelList.length === 0) {
+      console.warn(`No channels found for genre: ${selectedGenre || "All"}`);
       return Promise.resolve({ metas: [] });
     }
 
-    const selectedGenre = extra?.genre;
-    const filteredList =
-      selectedGenre && selectedGenre !== "All"
-        ? masterChannelList.filter(
-            (c) =>
-              c.source === selectedGenre || c.country?.name === selectedGenre
-          )
-        : masterChannelList;
-
-    const metas = filteredList.map((channel) => ({
+    const metas = channelList.map((channel) => ({
       id: channel.id,
       type: "tv",
       name: channel.name,
@@ -86,7 +91,8 @@ async function getAddon() {
     return Promise.resolve({ metas });
   });
 
-  // META HANDLER
+  // META HANDLER (Unchanged)
+  // This still relies on the master list for individual lookups, which is acceptable.
   builder.defineMetaHandler(async (args) => {
     console.log("Meta request for:", args);
     const { id } = args;
@@ -113,7 +119,7 @@ async function getAddon() {
     });
   });
 
-  // STREAM HANDLER
+  // STREAM HANDLER (Unchanged)
   builder.defineStreamHandler(async (args) => {
     console.log("Stream request for:", args);
     const { id } = args;
@@ -159,16 +165,10 @@ async function getAddon() {
  * The main serverless function handler for Vercel.
  */
 export default async function handler(req, res) {
-  // FIX: Use the official 'serveHTTP' function from the SDK.
-  // This is the recommended and most robust way to create a Stremio addon server.
-  // It handles all routing, request parsing, and response writing automatically,
-  // preventing subtle bugs that can occur with manual implementations.
   try {
     const addonInterface = await getAddon();
     serveHTTP(addonInterface, { req, res });
   } catch (err) {
-    // This will catch errors that happen during addonInterface creation.
-    // Errors during request handling are managed internally by serveHTTP.
     console.error("Handler initialization error:", err);
     res.writeHead(500);
     res.end(

@@ -31,7 +31,7 @@ export default async function handler(request, response) {
 
   console.log("Starting background data refresh job...");
 
-  // 1. Define Sources
+  // 1. Define Sources (Unchanged)
   const sources = [];
   const customM3uJson = process.env.CUSTOM_M3U_SOURCES_JSON || "[]";
   try {
@@ -49,32 +49,25 @@ export default async function handler(request, response) {
     );
   }
 
-  // 2. Parallel Processing with detailed logging
+  // 2. Parallel Processing (Unchanged)
   console.log("Starting to process iptv-org source...");
   const iptvOrgPromise = processIptvOrgSource();
-
   console.log(`Starting to process ${sources.length} custom sources...`);
   const customPromises = sources.map((source) => {
     console.log(`Processing custom source: ${source.name} (${source.url})`);
     return processCustomM3uSource(source);
   });
-
   const processingPromises = [iptvOrgPromise, ...customPromises];
   const results = await Promise.allSettled(processingPromises);
 
   let masterChannelList = [];
   const availableCatalogs = new Set();
 
-  // The first result is always iptv-org
+  // (Processing results logic is unchanged...)
   const iptvOrgResult = results[0];
-  console.log(`iptv-org result status: ${iptvOrgResult.status}`);
-
   if (iptvOrgResult.status === "fulfilled") {
     const iptvChannels = iptvOrgResult.value;
-    console.log(`iptv-org provided ${iptvChannels.length} channels`);
     masterChannelList.push(...iptvChannels);
-
-    // Add unique countries to catalogs
     const countries = new Set();
     iptvChannels.forEach((channel) => {
       if (channel.country?.name) {
@@ -82,119 +75,98 @@ export default async function handler(request, response) {
       }
     });
     countries.forEach((country) => availableCatalogs.add(country));
-
-    console.log(`Added ${countries.size} countries to catalogs from iptv-org`);
   } else {
-    console.error(
-      "CRITICAL: iptv-org source failed to process.",
-      iptvOrgResult.reason
-    );
+    console.error("CRITICAL: iptv-org source failed.", iptvOrgResult.reason);
     await sendAlertToWebhook("iptv-org", iptvOrgResult.reason);
   }
 
-  // Process custom sources
   results.slice(1).forEach((result, index) => {
     const sourceName = sources[index].name;
-    console.log(
-      `Custom source "${sourceName}" result status: ${result.status}`
-    );
-
     if (result.status === "fulfilled") {
       const customChannels = result.value;
-      console.log(
-        `Custom source "${sourceName}" provided ${customChannels.length} channels`
-      );
       masterChannelList.push(...customChannels);
-      availableCatalogs.add(sourceName); // Add the source name as a catalog
+      availableCatalogs.add(sourceName);
     } else {
-      console.error(`Source "${sourceName}" failed to process.`, result.reason);
+      console.error(`Source "${sourceName}" failed.`, result.reason);
       sendAlertToWebhook(sourceName, result.reason);
     }
   });
 
-  console.log(
-    `Total channels aggregated before health check: ${masterChannelList.length}`
-  );
-  console.log(`Total catalogs available: ${availableCatalogs.size}`);
+  console.log(`Total channels aggregated: ${masterChannelList.length}`);
 
-  // 3. Best-Effort Stream Probing
+  // 3. Best-Effort Stream Probing (Unchanged)
   if (masterChannelList.length > 0) {
-    console.log("Starting stream health probing...");
     await probeStreamHealth(masterChannelList);
-    console.log("Stream health probing completed");
-  } else {
-    console.log("Skipping stream health probing - no channels available");
   }
 
-  // 4. Store in Cache
+  // 4. Store in Cache (OPTIMIZED)
   if (masterChannelList.length === 0) {
     const criticalError = new Error(
-      "Master channel list is empty after processing. Aborting cache update."
+      "Master channel list is empty. Aborting cache update."
     );
     console.error(criticalError.message);
-    console.error("Processing summary:");
-    console.error(`- iptv-org status: ${results[0].status}`);
-    if (results[0].status === "rejected") {
-      console.error(`- iptv-org error: ${results[0].reason.message}`);
-    }
-    console.error(`- Custom sources processed: ${sources.length}`);
-    results.slice(1).forEach((result, index) => {
-      console.error(`- ${sources[index].name}: ${result.status}`);
-      if (result.status === "rejected") {
-        console.error(`  Error: ${result.reason.message}`);
-      }
-    });
-
     await sendAlertToWebhook("Cache Worker", criticalError);
-    return response.status(500).json({
-      status: "Failed",
-      message: criticalError.message,
-      processingTime: Date.now() - startTime,
-      details: {
-        iptvOrgStatus: results[0].status,
-        iptvOrgError:
-          results[0].status === "rejected" ? results[0].reason.message : null,
-        customSourcesCount: sources.length,
-        customSourcesResults: results.slice(1).map((r, i) => ({
-          name: sources[i].name,
-          status: r.status,
-          error: r.status === "rejected" ? r.reason.message : null,
-        })),
-      },
-    });
+    return response
+      .status(500)
+      .json({ status: "Failed", message: criticalError.message });
   }
 
   try {
+    const cachePromises = [];
     const sortedCatalogs = Array.from(availableCatalogs).sort();
-    await setInCache(MASTER_CHANNEL_LIST_KEY, masterChannelList);
-    await setInCache(AVAILABLE_CATALOGS_KEY, sortedCatalogs);
+
+    // **NEW**: Group channels by their catalog name for optimized fetching
+    const channelsByCatalog = {};
+    sortedCatalogs.forEach((catalog) => (channelsByCatalog[catalog] = []));
+
+    masterChannelList.forEach((channel) => {
+      // Custom M3U sources use the source name as the catalog.
+      // iptv-org channels use their country name as the catalog.
+      const catalogName = availableCatalogs.has(channel.source)
+        ? channel.source
+        : channel.country?.name;
+
+      if (catalogName && channelsByCatalog[catalogName]) {
+        channelsByCatalog[catalogName].push(channel);
+      }
+    });
+
+    console.log("Storing individual catalogs for performance...");
+    for (const catalogName in channelsByCatalog) {
+      const cacheKey = `catalog_${catalogName}`;
+      const catalogChannels = channelsByCatalog[catalogName];
+      if (catalogChannels.length > 0) {
+        console.log(
+          `  - Storing ${catalogChannels.length} channels for catalog: ${catalogName}`
+        );
+        cachePromises.push(setInCache(cacheKey, catalogChannels));
+      }
+    }
+
+    // Store the master list (for meta/stream lookups) and the list of catalog names
+    console.log(
+      `Storing master list with ${masterChannelList.length} channels.`
+    );
+    cachePromises.push(setInCache(MASTER_CHANNEL_LIST_KEY, masterChannelList));
+    cachePromises.push(setInCache(AVAILABLE_CATALOGS_KEY, sortedCatalogs));
+
+    // Execute all cache operations in parallel
+    await Promise.all(cachePromises);
 
     const processingTime = Date.now() - startTime;
-    console.log(
-      `Successfully updated cache with ${masterChannelList.length} channels and ${sortedCatalogs.length} catalogs in ${processingTime}ms.`
-    );
+    console.log(`Successfully updated cache in ${processingTime}ms.`);
 
     return response.status(200).json({
       status: "Success",
       channels: masterChannelList.length,
       catalogs: sortedCatalogs.length,
       processingTime,
-      sources: {
-        iptvOrg:
-          results[0].status === "fulfilled" ? results[0].value.length : 0,
-        custom: results.slice(1).map((r, i) => ({
-          name: sources[i].name,
-          channels: r.status === "fulfilled" ? r.value.length : 0,
-        })),
-      },
     });
   } catch (error) {
     console.error("Failed to write to cache.", error);
     await sendAlertToWebhook("Cache Writer", error);
-    return response.status(500).json({
-      status: "Failed",
-      message: "Could not write to cache.",
-      processingTime: Date.now() - startTime,
-    });
+    return response
+      .status(500)
+      .json({ status: "Failed", message: "Could not write to cache." });
   }
 }
