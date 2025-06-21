@@ -6,7 +6,7 @@
  * from the Vercel KV cache and formatting it for Stremio.
  */
 
-import { addonBuilder, serveHTTP } from "stremio-addon-sdk";
+import { addonBuilder } from "stremio-addon-sdk";
 import {
   getFromCache,
   MASTER_CHANNEL_LIST_KEY,
@@ -163,13 +163,82 @@ builder.defineStreamHandler(async ({ id }) => {
   return Promise.resolve({ streams });
 });
 
-// This is the main serverless function entry point
-export default async function handler(req, res) {
-  const addonInterface = await getManifest();
+// Build the addon
+const addonInterface = builder.getInterface();
 
-  // Use serveHTTP from the SDK to handle the request
-  serveHTTP(addonInterface, {
-    request: req,
-    response: res,
-  });
+// This is the main serverless function entry point for Vercel
+export default async function handler(req, res) {
+  // Set CORS headers
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Cache-Control", `public, max-age=${CACHE_MAX_AGE}`);
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  try {
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const pathname = url.pathname;
+    const searchParams = url.searchParams;
+
+    console.log(`Request: ${req.method} ${pathname}`);
+
+    // Handle manifest.json
+    if (pathname === "/manifest.json" || pathname === "/") {
+      const manifest = await getManifest();
+      return res.status(200).json(manifest);
+    }
+
+    // Handle catalog requests
+    if (pathname.startsWith("/catalog/")) {
+      const pathParts = pathname.split("/");
+      if (pathParts.length >= 4) {
+        const type = pathParts[2];
+        const id = pathParts[3];
+        const extra = {};
+
+        // Parse extra parameters
+        for (const [key, value] of searchParams.entries()) {
+          extra[key] = value;
+        }
+
+        const result = await builder.catalogHandler({ type, id, extra });
+        return res.status(200).json(result);
+      }
+    }
+
+    // Handle meta requests
+    if (pathname.startsWith("/meta/")) {
+      const pathParts = pathname.split("/");
+      if (pathParts.length >= 4) {
+        const type = pathParts[2];
+        const id = pathParts[3];
+
+        const result = await builder.metaHandler({ type, id });
+        return res.status(200).json(result);
+      }
+    }
+
+    // Handle stream requests
+    if (pathname.startsWith("/stream/")) {
+      const pathParts = pathname.split("/");
+      if (pathParts.length >= 4) {
+        const type = pathParts[2];
+        const id = pathParts[3];
+
+        const result = await builder.streamHandler({ type, id });
+        return res.status(200).json(result);
+      }
+    }
+
+    // Default: return 404
+    return res.status(404).json({ error: "Not found" });
+  } catch (error) {
+    console.error("Handler error:", error);
+    return res
+      .status(500)
+      .json({ error: "Internal server error", details: error.message });
+  }
 }
