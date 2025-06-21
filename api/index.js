@@ -1,8 +1,8 @@
 /**
  * @file api/index.js
- * @description The User-Facing API (Stremio Handlers).
+ * @description The User-Facing API (Stremio Handlers) - OPTIMIZED VERSION
  * This serverless function responds to requests from the Stremio application.
- * It is architected to be stateless and serverless-safe.
+ * It is architected to be stateless and serverless-safe with performance optimizations.
  */
 
 import pkg from "stremio-addon-sdk";
@@ -24,7 +24,7 @@ async function getAddon() {
 
   const builder = new addonBuilder({
     id: "com.tvmux.addon",
-    version: "1.0.9", // Bump version to signify the definitive fix
+    version: "1.0.10", // Bump version for performance optimizations
     name: "TVMux",
     description: "Resilient IPTV addon sourcing from public and custom lists.",
     resources: ["catalog", "meta", "stream"],
@@ -51,7 +51,7 @@ async function getAddon() {
   });
   console.log("GETADDON: Full addon builder configured.");
 
-  // CATALOG HANDLER
+  // CATALOG HANDLER - OPTIMIZED
   builder.defineCatalogHandler(async (args) => {
     const requestStartTime = Date.now();
     console.log(
@@ -66,14 +66,66 @@ async function getAddon() {
 
     const selectedGenre = extra?.genre;
     let channelList = [];
+    const MAX_CHANNELS_PER_REQUEST = 50; // Limit to prevent timeouts
 
     if (selectedGenre && selectedGenre !== "All") {
+      // FAST PATH: Use pre-cached genre-specific channels
       const cacheKey = `catalog_${selectedGenre}`;
       console.log(`CATALOG HANDLER: FAST PATH. Key: '${cacheKey}'`);
       channelList = (await getFromCache(cacheKey)) || [];
+
+      // Limit the number of channels returned
+      if (channelList.length > MAX_CHANNELS_PER_REQUEST) {
+        channelList = channelList.slice(0, MAX_CHANNELS_PER_REQUEST);
+        console.log(
+          `CATALOG HANDLER: Limited to ${MAX_CHANNELS_PER_REQUEST} channels for performance`
+        );
+      }
     } else {
-      console.log(`CATALOG HANDLER: SLOW PATH. Fetching master list.`);
-      channelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+      // OPTIMIZED DEFAULT PATH: Get available catalogs and show a sample from each
+      console.log(
+        `CATALOG HANDLER: OPTIMIZED DEFAULT PATH. Getting sample from all catalogs.`
+      );
+
+      try {
+        const availableCatalogs =
+          (await getFromCache(AVAILABLE_CATALOGS_KEY)) || [];
+        console.log(`Found ${availableCatalogs.length} available catalogs`);
+
+        if (availableCatalogs.length === 0) {
+          console.warn(
+            "No available catalogs found, falling back to master list sample"
+          );
+          const masterList =
+            (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+          channelList = masterList.slice(0, MAX_CHANNELS_PER_REQUEST);
+        } else {
+          // Get a small sample from each catalog (up to 10 channels per catalog)
+          const channelsPerCatalog = Math.max(
+            1,
+            Math.floor(MAX_CHANNELS_PER_REQUEST / availableCatalogs.length)
+          );
+          const samplePromises = availableCatalogs
+            .slice(0, 10)
+            .map(async (catalog) => {
+              // Limit to 10 catalogs
+              const cacheKey = `catalog_${catalog}`;
+              const catalogChannels = (await getFromCache(cacheKey)) || [];
+              return catalogChannels.slice(0, channelsPerCatalog);
+            });
+
+          const catalogSamples = await Promise.all(samplePromises);
+          channelList = catalogSamples.flat();
+          console.log(
+            `Assembled ${channelList.length} channels from ${catalogSamples.length} catalogs`
+          );
+        }
+      } catch (error) {
+        console.error("Error in optimized default path:", error);
+        // Emergency fallback - get a small sample from master list
+        const masterList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+        channelList = masterList.slice(0, MAX_CHANNELS_PER_REQUEST);
+      }
     }
 
     if (channelList.length === 0) {
@@ -85,12 +137,15 @@ async function getAddon() {
       return Promise.resolve({ metas: [] });
     }
 
+    // Convert channels to metas format
     const metas = channelList.map((channel) => ({
       id: channel.id,
       type: "tv",
       name: channel.name,
       poster: channel.logo,
       posterShape: "square",
+      // Add genre information for better filtering
+      genres: channel.categories ? channel.categories.slice(0, 3) : undefined,
     }));
 
     console.log(
@@ -101,36 +156,110 @@ async function getAddon() {
     return Promise.resolve({ metas });
   });
 
-  // META HANDLER
+  // META HANDLER - OPTIMIZED
   builder.defineMetaHandler(async (args) => {
-    const masterChannelList =
-      (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
-    const channel = masterChannelList.find((c) => c.id === args.id);
-    if (!channel) return Promise.resolve({ meta: null });
-    return Promise.resolve({
-      meta: {
+    const requestStartTime = Date.now();
+    console.log(`META HANDLER: Looking up channel ID: ${args.id}`);
+
+    try {
+      const masterChannelList =
+        (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+      const channel = masterChannelList.find((c) => c.id === args.id);
+
+      if (!channel) {
+        console.warn(`META HANDLER: Channel not found: ${args.id}`);
+        return Promise.resolve({ meta: null });
+      }
+
+      const meta = {
         id: channel.id,
         type: "tv",
         name: channel.name,
         poster: channel.logo,
         posterShape: "square",
-      },
-    });
+        // Add additional metadata
+        genres: channel.categories || [],
+        description: `${channel.name} from ${channel.source}${
+          channel.country?.name ? ` (${channel.country.name})` : ""
+        }`,
+      };
+
+      console.log(
+        `META HANDLER: Found metadata in ${Date.now() - requestStartTime}ms`
+      );
+      return Promise.resolve({ meta });
+    } catch (error) {
+      console.error("META HANDLER: Error fetching metadata:", error);
+      return Promise.resolve({ meta: null });
+    }
   });
 
-  // STREAM HANDLER
+  // STREAM HANDLER - OPTIMIZED
   builder.defineStreamHandler(async (args) => {
-    const masterChannelList =
-      (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
-    const channel = masterChannelList.find((c) => c.id === args.id);
-    if (!channel || !channel.streams || channel.streams.length === 0) {
+    const requestStartTime = Date.now();
+    console.log(
+      `STREAM HANDLER: Looking up streams for channel ID: ${args.id}`
+    );
+
+    try {
+      const masterChannelList =
+        (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+      const channel = masterChannelList.find((c) => c.id === args.id);
+
+      if (!channel || !channel.streams || channel.streams.length === 0) {
+        console.warn(
+          `STREAM HANDLER: No streams found for channel: ${args.id}`
+        );
+        return Promise.resolve({ streams: [] });
+      }
+
+      // Sort streams by health status (verified first)
+      const sortedStreams = [...channel.streams].sort((a, b) => {
+        if (a.health === "verified" && b.health !== "verified") return -1;
+        if (b.health === "verified" && a.health !== "verified") return 1;
+        return 0;
+      });
+
+      const streams = sortedStreams.map((stream, index) => {
+        let title = "📺 Stream";
+        if (stream.health === "verified") {
+          title = "✅ Verified Stream";
+        } else if (stream.health === "failed") {
+          title = "⚠️ Unverified Stream";
+        } else if (stream.quality) {
+          title = `📺 ${stream.quality} Stream`;
+        }
+
+        // Add stream index if multiple streams
+        if (sortedStreams.length > 1) {
+          title += ` (${index + 1})`;
+        }
+
+        const streamObj = {
+          url: stream.url,
+          title,
+        };
+
+        // Add headers if available
+        if (stream.user_agent || stream.referrer) {
+          streamObj.behaviorHints = {
+            notWebReady: true,
+          };
+        }
+
+        return streamObj;
+      });
+
+      console.log(
+        `STREAM HANDLER: Returning ${streams.length} streams in ${
+          Date.now() - requestStartTime
+        }ms`
+      );
+      return Promise.resolve({ streams });
+    } catch (error) {
+      console.error("STREAM HANDLER: Error fetching streams:", error);
       return Promise.resolve({ streams: [] });
     }
-    const streams = channel.streams.map((stream) => ({
-      url: stream.url,
-      title: stream.health === "verified" ? "✅ Verified" : "❔ Untested",
-    }));
-    return Promise.resolve({ streams });
   });
 
   console.log("GETADDON: Full handlers defined. Returning interface.");
@@ -144,6 +273,17 @@ export default async function handler(req, res) {
   const handlerStartTime = Date.now();
   console.log(`HANDLER: Function handler started for URL: ${req.url}`);
 
+  // Set CORS headers for all responses
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // Handle preflight requests
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
+
   // FIX: Bypass the SDK for the manifest request to avoid timeouts.
   // We serve a lightweight, simplified manifest manually for fast installation.
   if (req.url === "/manifest.json" || req.url === "/") {
@@ -152,7 +292,7 @@ export default async function handler(req, res) {
     );
     const lightweightManifest = {
       id: "com.tvmux.addon",
-      version: "1.0.9",
+      version: "1.0.10",
       name: "TVMux",
       description:
         "Resilient IPTV addon sourcing from public and custom lists.",
@@ -173,8 +313,7 @@ export default async function handler(req, res) {
         configurationRequired: false,
       },
     };
-    // Add the crucial CORS header to allow Stremio to fetch the manifest.
-    res.setHeader("Access-Control-Allow-Origin", "*");
+
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(lightweightManifest));
     console.log(
@@ -185,27 +324,47 @@ export default async function handler(req, res) {
     return;
   }
 
-  // For all other requests (catalog, meta, stream), use the full SDK.
+  // For all other requests (catalog, meta, stream), use the full SDK with timeout protection
   try {
-    const addonInterface = await getAddon();
+    // Add a timeout wrapper to prevent hanging
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(
+        () => reject(new Error("Handler timeout after 50 seconds")),
+        50000
+      );
+    });
+
+    const addonPromise = getAddon().then((addonInterface) => {
+      return new Promise((resolve, reject) => {
+        // Wrap serveHTTP in a promise to handle it properly
+        try {
+          serveHTTP(addonInterface, { req, res });
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+
+    await Promise.race([addonPromise, timeoutPromise]);
+
     console.log(
-      `HANDLER: Full addon interface created in ${
-        Date.now() - handlerStartTime
-      }ms.`
+      `HANDLER: Request completed in ${Date.now() - handlerStartTime}ms.`
     );
-    serveHTTP(addonInterface, { req, res });
-    console.log(`HANDLER: Handed request to serveHTTP.`);
   } catch (err) {
     console.error(
-      "HANDLER: A critical error occurred during full addon initialization.",
+      "HANDLER: A critical error occurred during request processing.",
       err
     );
-    res.writeHead(500);
-    res.end(
-      JSON.stringify({
-        error: "Internal Server Error during addon initialization.",
-        detail: err.message,
-      })
-    );
+
+    if (!res.headersSent) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: "Internal Server Error during request processing.",
+          detail: err.message,
+        })
+      );
+    }
   }
 }
