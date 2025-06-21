@@ -19,6 +19,7 @@ const CACHE_MAX_AGE = 60 * 5; // 5 minutes in seconds for browser/cdn caching
 let manifestCache = null;
 let manifestCacheTime = null;
 
+// Create the addon builder with proper manifest structure
 const builder = new addonBuilder({
   id: "com.tvmux.addon",
   version: "1.0.0",
@@ -26,17 +27,29 @@ const builder = new addonBuilder({
   description: "Resilient IPTV addon sourcing from public and custom lists.",
   resources: ["catalog", "meta", "stream"],
   types: ["tv"],
-  catalogs: [], // We will populate this dynamically
+  catalogs: [
+    {
+      type: "tv",
+      id: "tvmux-main-catalog",
+      name: "TVMux Channels",
+      extra: [
+        {
+          name: "genre",
+          options: [], // Will be populated dynamically
+          isRequired: false,
+        },
+      ],
+    },
+  ],
   idPrefixes: ["tvmux_"],
   behaviorHints: {
-    configurable: true, // Indicates the addon has settings
+    configurable: true,
     configurationRequired: false,
   },
 });
 
-// === MANIFEST HANDLER ===
-// Dynamically builds the manifest with catalogs from the cache.
-async function getManifest(config) {
+// === DYNAMIC MANIFEST GENERATION ===
+async function getDynamicManifest() {
   const now = Date.now();
   if (manifestCache && manifestCacheTime && now - manifestCacheTime < 300000) {
     // 5 min TTL
@@ -44,26 +57,22 @@ async function getManifest(config) {
   }
 
   const availableCatalogs = (await getFromCache(AVAILABLE_CATALOGS_KEY)) || [];
-
   const baseManifest = builder.getInterface();
 
+  // Create a new manifest with dynamic catalogs
   const manifest = {
-    id: baseManifest.id,
-    version: baseManifest.version,
-    name: baseManifest.name,
-    description: baseManifest.description,
-    resources: baseManifest.resources,
-    types: baseManifest.types,
-    idPrefixes: baseManifest.idPrefixes,
-    behaviorHints: baseManifest.behaviorHints,
+    ...baseManifest,
     catalogs: [
       {
         type: "tv",
         id: "tvmux-main-catalog",
         name: "TVMux Channels",
-        // Allow users to filter by the sources we found
         extra: [
-          { name: "genre", options: availableCatalogs, isRequired: false },
+          {
+            name: "genre",
+            options: availableCatalogs.length > 0 ? availableCatalogs : ["All"],
+            isRequired: false,
+          },
         ],
       },
     ],
@@ -77,22 +86,24 @@ async function getManifest(config) {
 // === CATALOG HANDLER ===
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   console.log("Catalog request:", { type, id, extra });
+
   if (type !== "tv" || id !== "tvmux-main-catalog") {
-    return Promise.resolve({ metas: [] });
+    return { metas: [] };
   }
 
   const masterChannelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
   if (masterChannelList.length === 0) {
-    return Promise.resolve({ metas: [] });
+    return { metas: [] };
   }
 
   // Filter based on genre (which we use for source/country)
-  const selectedGenre = extra.genre;
-  const filteredList = selectedGenre
-    ? masterChannelList.filter(
-        (c) => c.source === selectedGenre || c.country?.name === selectedGenre
-      )
-    : masterChannelList;
+  const selectedGenre = extra?.genre;
+  const filteredList =
+    selectedGenre && selectedGenre !== "All"
+      ? masterChannelList.filter(
+          (c) => c.source === selectedGenre || c.country?.name === selectedGenre
+        )
+      : masterChannelList;
 
   const metas = filteredList.map((channel) => ({
     id: channel.id,
@@ -102,17 +113,18 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     posterShape: "square",
   }));
 
-  return Promise.resolve({ metas });
+  return { metas };
 });
 
 // === META HANDLER ===
 builder.defineMetaHandler(async ({ id }) => {
   console.log("Meta request for:", id);
+
   const masterChannelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
   const channel = masterChannelList.find((c) => c.id === id);
 
   if (!channel) {
-    return Promise.resolve({ meta: null });
+    return { meta: null };
   }
 
   const meta = {
@@ -128,17 +140,18 @@ builder.defineMetaHandler(async ({ id }) => {
     ).join(", ")}`,
   };
 
-  return Promise.resolve({ meta });
+  return { meta };
 });
 
 // === STREAM HANDLER ===
 builder.defineStreamHandler(async ({ id }) => {
   console.log("Stream request for:", id);
+
   const masterChannelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
   const channel = masterChannelList.find((c) => c.id === id);
 
   if (!channel || !channel.streams || channel.streams.length === 0) {
-    return Promise.resolve({ streams: [] });
+    return { streams: [] };
   }
 
   // Sort streams to put 'verified' ones first.
@@ -148,32 +161,36 @@ builder.defineStreamHandler(async ({ id }) => {
     return 0;
   });
 
-  const streams = sortedStreams.map((stream) => ({
-    url: stream.url,
-    // Add visual indicator for stream health
-    title: `${
-      stream.health === "verified"
-        ? "✅"
-        : stream.health === "failed"
-        ? "❌"
-        : "❔"
-    } Verified Source`,
-    behaviorHints: {
-      // Provide headers if they exist
-      headers: {
-        "User-Agent": stream.user_agent,
-        Referer: stream.referrer,
-      },
-      // notWebReady might be true for some streams, but we assume false by default
-      notWebReady: false,
-    },
-  }));
+  const streams = sortedStreams.map((stream) => {
+    const streamObj = {
+      url: stream.url,
+      title: `${
+        stream.health === "verified"
+          ? "✅"
+          : stream.health === "failed"
+          ? "❌"
+          : "❔"
+      } Verified Source`,
+    };
 
-  return Promise.resolve({ streams });
+    // Add headers if they exist
+    if (stream.user_agent || stream.referrer) {
+      streamObj.behaviorHints = {
+        headers: {},
+      };
+      if (stream.user_agent) {
+        streamObj.behaviorHints.headers["User-Agent"] = stream.user_agent;
+      }
+      if (stream.referrer) {
+        streamObj.behaviorHints.headers["Referer"] = stream.referrer;
+      }
+    }
+
+    return streamObj;
+  });
+
+  return { streams };
 });
-
-// Build the addon
-const addonInterface = builder.getInterface();
 
 // This is the main serverless function entry point for Vercel
 export default async function handler(req, res) {
@@ -190,62 +207,39 @@ export default async function handler(req, res) {
   try {
     const url = new URL(req.url, `https://${req.headers.host}`);
     const pathname = url.pathname;
-    const searchParams = url.searchParams;
 
     console.log(`Request: ${req.method} ${pathname}`);
 
-    // Handle manifest.json
+    // Handle manifest.json - use dynamic manifest
     if (pathname === "/manifest.json" || pathname === "/") {
-      const manifest = await getManifest();
+      const manifest = await getDynamicManifest();
       return res.status(200).json(manifest);
     }
 
-    // Handle catalog requests
-    if (pathname.startsWith("/catalog/")) {
-      const pathParts = pathname.split("/");
-      if (pathParts.length >= 4) {
-        const type = pathParts[2];
-        const id = pathParts[3];
-        const extra = {};
+    // For all other routes, use the SDK's built-in router
+    const addonInterface = builder.getInterface();
 
-        // Parse extra parameters
-        for (const [key, value] of searchParams.entries()) {
-          extra[key] = value;
-        }
+    // The SDK creates handlers in the 'get' object
+    if (addonInterface.get && addonInterface.get[pathname]) {
+      const handler = addonInterface.get[pathname];
+      const query = Object.fromEntries(url.searchParams.entries());
 
-        const result = await builder.catalogHandler({ type, id, extra });
+      try {
+        const result = await handler(query);
         return res.status(200).json(result);
+      } catch (handlerError) {
+        console.error("Handler error:", handlerError);
+        return res.status(500).json({
+          error: "Handler error",
+          details: handlerError.message,
+        });
       }
     }
 
-    // Handle meta requests
-    if (pathname.startsWith("/meta/")) {
-      const pathParts = pathname.split("/");
-      if (pathParts.length >= 4) {
-        const type = pathParts[2];
-        const id = pathParts[3];
-
-        const result = await builder.metaHandler({ type, id });
-        return res.status(200).json(result);
-      }
-    }
-
-    // Handle stream requests
-    if (pathname.startsWith("/stream/")) {
-      const pathParts = pathname.split("/");
-      if (pathParts.length >= 4) {
-        const type = pathParts[2];
-        const id = pathParts[3];
-
-        const result = await builder.streamHandler({ type, id });
-        return res.status(200).json(result);
-      }
-    }
-
-    // Default: return 404
+    // If no handler found, return 404
     return res.status(404).json({ error: "Not found" });
   } catch (error) {
-    console.error("Handler error:", error);
+    console.error("Main handler error:", error);
     return res
       .status(500)
       .json({ error: "Internal server error", details: error.message });
