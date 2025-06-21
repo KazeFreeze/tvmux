@@ -45,8 +45,17 @@ async function getManifest(config) {
 
   const availableCatalogs = (await getFromCache(AVAILABLE_CATALOGS_KEY)) || [];
 
+  const baseManifest = builder.getInterface();
+
   const manifest = {
-    ...builder.getInterface(),
+    id: baseManifest.id,
+    version: baseManifest.version,
+    name: baseManifest.name,
+    description: baseManifest.description,
+    resources: baseManifest.resources,
+    types: baseManifest.types,
+    idPrefixes: baseManifest.idPrefixes,
+    behaviorHints: baseManifest.behaviorHints,
     catalogs: [
       {
         type: "tv",
