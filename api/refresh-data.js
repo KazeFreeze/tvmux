@@ -1,22 +1,21 @@
 /**
  * @file api/refresh-data.js
- * @description Background Worker (Cron Job) serverless function.
- * This endpoint is triggered by Vercel Cron Jobs. It fetches data, processes it,
- * and stores the final dataset in the Vercel KV cache using efficient batching.
+ * @description Background Worker that fetches, processes, probes, FILTERS,
+ * and caches data using efficient batching.
  */
 
 import { sendAlertToWebhook } from "./_lib/alerter.js";
 import {
   setInCache,
-  setMultipleInCache, // Import the new batch function
+  setMultipleInCache,
   MASTER_CHANNEL_LIST_KEY,
   AVAILABLE_CATALOGS_KEY,
 } from "./_lib/cache.js";
 import {
   processIptvOrgSource,
   processCustomM3uSource,
-  probeStreamHealth,
-} from "./_lib/data-processor.js";
+  probeAndFilterStreamHealth,
+} from "./_lib/data-processor.js"; // Updated import
 
 export default async function handler(request, response) {
   const startTime = Date.now();
@@ -30,11 +29,9 @@ export default async function handler(request, response) {
 
   console.log("Starting background data refresh job...");
 
-  // (Steps 1, 2, and 3: Fetching, Processing, and Probing are unchanged)
   const sources = [];
-  const customM3uJson = process.env.CUSTOM_M3U_SOURCES_JSON || "[]";
   try {
-    sources.push(...JSON.parse(customM3uJson));
+    sources.push(...JSON.parse(process.env.CUSTOM_M3U_SOURCES_JSON || "[]"));
   } catch (e) {
     console.error("Failed to parse CUSTOM_M3U_SOURCES_JSON.", e);
   }
@@ -44,39 +41,42 @@ export default async function handler(request, response) {
     ...sources.map(processCustomM3uSource),
   ]);
 
-  let masterChannelList = [];
+  let aggregatedChannelList = [];
   const availableCatalogs = new Set();
 
-  const iptvOrgResult = results[0];
-  if (iptvOrgResult.status === "fulfilled") {
-    masterChannelList.push(...iptvOrgResult.value);
-    iptvOrgResult.value.forEach((c) => availableCatalogs.add(c.country?.name));
-  } else {
-    console.error("CRITICAL: iptv-org source failed.", iptvOrgResult.reason);
-    await sendAlertToWebhook("iptv-org", iptvOrgResult.reason);
-  }
-
-  results.slice(1).forEach((result, index) => {
-    const sourceName = sources[index].name;
-    if (result.status === "fulfilled") {
-      masterChannelList.push(...result.value);
-      availableCatalogs.add(sourceName);
+  results.forEach((result, index) => {
+    const isIptvOrg = index === 0;
+    const sourceName = isIptvOrg ? "iptv-org" : sources[index - 1].name;
+    if (result.status === "fulfilled" && result.value) {
+      aggregatedChannelList.push(...result.value);
+      if (isIptvOrg) {
+        result.value.forEach(
+          (c) => c.country?.name && availableCatalogs.add(c.country.name)
+        );
+      } else {
+        availableCatalogs.add(sourceName);
+      }
     } else {
       console.error(`Source "${sourceName}" failed.`, result.reason);
-      sendAlertToWebhook(sourceName, result.reason);
+      sendAlertToWebhook(
+        sourceName,
+        result.reason || new Error("Unknown processing error")
+      );
     }
   });
 
-  console.log(`Total channels aggregated: ${masterChannelList.length}`);
+  console.log(
+    `Total channels aggregated before health check: ${aggregatedChannelList.length}`
+  );
 
-  if (masterChannelList.length > 0) {
-    await probeStreamHealth(masterChannelList);
-  }
+  // --- CHANGE: Call the new probe and filter function ---
+  const masterChannelList = await probeAndFilterStreamHealth(
+    aggregatedChannelList
+  );
 
-  // 4. Store in Cache (OPTIMIZED WITH BATCHING)
   if (masterChannelList.length === 0) {
     const criticalError = new Error(
-      "Master list is empty. Aborting cache update."
+      "Master list is empty after health check. Aborting cache update."
     );
     console.error(criticalError.message);
     await sendAlertToWebhook("Cache Worker", criticalError);
@@ -89,55 +89,48 @@ export default async function handler(request, response) {
     const cachePromises = [];
     const sortedCatalogs = Array.from(availableCatalogs).sort();
 
-    // --- START OF MAJOR CHANGE ---
-    // Prepare a single object for a batch `mset` operation for all individual channels.
-    // This is much more efficient than thousands of individual `set` calls.
     const individualChannelsToCache = {};
     masterChannelList.forEach((channel) => {
-      const individualChannelKey = `channel_${channel.id}`;
-      individualChannelsToCache[individualChannelKey] = channel;
+      individualChannelsToCache[`channel_${channel.id}`] = channel;
     });
-
     console.log(
       `Prepared ${
         Object.keys(individualChannelsToCache).length
-      } individual channels for batch caching.`
+      } healthy channels for batch caching.`
     );
-    // Add the single batch operation to our list of promises.
     cachePromises.push(setMultipleInCache(individualChannelsToCache));
-    // --- END OF MAJOR CHANGE ---
 
     const channelsByCatalog = {};
-    sortedCatalogs.forEach((catalog) => (channelsByCatalog[catalog] = []));
     masterChannelList.forEach((channel) => {
-      const catalogName = availableCatalogs.has(channel.source)
-        ? channel.source
-        : channel.country?.name;
-      if (catalogName && channelsByCatalog[catalogName]) {
+      const catalogName =
+        channel.source === "iptv-org" ? channel.country?.name : channel.source;
+      if (catalogName) {
+        if (!channelsByCatalog[catalogName]) {
+          channelsByCatalog[catalogName] = [];
+        }
         channelsByCatalog[catalogName].push(channel);
       }
     });
 
     console.log("Storing individual catalogs...");
     for (const catalogName in channelsByCatalog) {
-      const cacheKey = `catalog_${catalogName}`;
-      const catalogChannels = channelsByCatalog[catalogName];
-      if (catalogChannels.length > 0) {
-        // These are fewer, so individual sets are fine.
-        cachePromises.push(setInCache(cacheKey, catalogChannels));
-      }
+      cachePromises.push(
+        setInCache(`catalog_${catalogName}`, channelsByCatalog[catalogName])
+      );
     }
 
     console.log(`Storing master list and catalog list.`);
     cachePromises.push(setInCache(MASTER_CHANNEL_LIST_KEY, masterChannelList));
-    cachePromises.push(setInCache(AVAILABLE_CATALOGS_KEY, sortedCatalogs));
+    cachePromises.push(
+      setInCache(
+        AVAILABLE_CATALOGS_KEY,
+        sortedCatalogs.filter((c) => channelsByCatalog[c])
+      )
+    ); // Only store catalogs that have channels
 
-    // Execute all cache operations in parallel. This will now be much faster.
     await Promise.all(cachePromises);
-
     const processingTime = Date.now() - startTime;
     console.log(`Successfully updated cache in ${processingTime}ms.`);
-
     return response.status(200).json({
       status: "Success",
       channels: masterChannelList.length,
