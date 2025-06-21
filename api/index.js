@@ -2,66 +2,31 @@
  * @file api/index.js
  * @description The User-Facing API (Stremio Handlers).
  * This serverless function responds to requests from the Stremio application.
- * It is designed to be lightweight and fast, reading pre-computed data
- * from the Vercel KV cache and formatting it for Stremio.
+ * It is architected to be stateless, dynamically building the addon interface
+ * on each request using data from the Vercel KV cache.
  */
 
-import { addonBuilder } from "stremio-addon-sdk";
+import { addonBuilder, serveHTTP } from "stremio-addon-sdk";
 import {
   getFromCache,
   MASTER_CHANNEL_LIST_KEY,
   AVAILABLE_CATALOGS_KEY,
 } from "./_lib/cache.js";
 
-const CACHE_MAX_AGE = 60 * 5; // 5 minutes in seconds for browser/cdn caching
+const CACHE_MAX_AGE = 60 * 5; // 5 minutes in seconds
 
-// In-memory cache for the manifest to avoid hitting KV on every manifest request.
-let manifestCache = null;
-let manifestCacheTime = null;
-
-// Create the addon builder with proper manifest structure
-const builder = new addonBuilder({
-  id: "com.tvmux.addon",
-  version: "1.0.0",
-  name: "TVMux",
-  description: "Resilient IPTV addon sourcing from public and custom lists.",
-  resources: ["catalog", "meta", "stream"],
-  types: ["tv"],
-  catalogs: [
-    {
-      type: "tv",
-      id: "tvmux-main-catalog",
-      name: "TVMux Channels",
-      extra: [
-        {
-          name: "genre",
-          options: [], // Will be populated dynamically
-          isRequired: false,
-        },
-      ],
-    },
-  ],
-  idPrefixes: ["tvmux_"],
-  behaviorHints: {
-    configurable: true,
-    configurationRequired: false,
-  },
-});
-
-// === DYNAMIC MANIFEST GENERATION ===
-async function getDynamicManifest() {
-  const now = Date.now();
-  if (manifestCache && manifestCacheTime && now - manifestCacheTime < 300000) {
-    // 5 min TTL
-    return manifestCache;
-  }
-
+/**
+ * Creates and configures the Stremio addon interface.
+ * This function is called on every request to ensure the addon's catalog
+ * (genres/countries) is always up-to-date from the KV cache.
+ * @returns {Promise<object>} A promise that resolves to a Stremio addon interface.
+ */
+async function getAddonInterface() {
   const availableCatalogs = (await getFromCache(AVAILABLE_CATALOGS_KEY)) || [];
 
-  // Create the manifest object directly, don't use builder.getInterface()
-  const manifest = {
+  const builder = new addonBuilder({
     id: "com.tvmux.addon",
-    version: "1.0.0",
+    version: "1.0.1", // Bump version to signify update
     name: "TVMux",
     description: "Resilient IPTV addon sourcing from public and custom lists.",
     resources: ["catalog", "meta", "stream"],
@@ -74,7 +39,10 @@ async function getDynamicManifest() {
         extra: [
           {
             name: "genre",
-            options: availableCatalogs.length > 0 ? availableCatalogs : ["All"],
+            options:
+              availableCatalogs.length > 0
+                ? ["All", ...availableCatalogs]
+                : ["All"],
             isRequired: false,
           },
         ],
@@ -85,172 +53,157 @@ async function getDynamicManifest() {
       configurable: true,
       configurationRequired: false,
     },
-  };
-
-  manifestCache = manifest;
-  manifestCacheTime = now;
-  return manifest;
-}
-
-// === CATALOG HANDLER ===
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
-  console.log("Catalog request:", { type, id, extra });
-
-  if (type !== "tv" || id !== "tvmux-main-catalog") {
-    return { metas: [] };
-  }
-
-  const masterChannelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
-  if (masterChannelList.length === 0) {
-    return { metas: [] };
-  }
-
-  // Filter based on genre (which we use for source/country)
-  const selectedGenre = extra?.genre;
-  const filteredList =
-    selectedGenre && selectedGenre !== "All"
-      ? masterChannelList.filter(
-          (c) => c.source === selectedGenre || c.country?.name === selectedGenre
-        )
-      : masterChannelList;
-
-  const metas = filteredList.map((channel) => ({
-    id: channel.id,
-    type: "tv",
-    name: channel.name,
-    poster: channel.logo,
-    posterShape: "square",
-  }));
-
-  return { metas };
-});
-
-// === META HANDLER ===
-builder.defineMetaHandler(async ({ id }) => {
-  console.log("Meta request for:", id);
-
-  const masterChannelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
-  const channel = masterChannelList.find((c) => c.id === id);
-
-  if (!channel) {
-    return { meta: null };
-  }
-
-  const meta = {
-    id: channel.id,
-    type: "tv",
-    name: channel.name,
-    poster: channel.logo,
-    posterShape: "square",
-    logo: channel.logo,
-    background: "https://dl.strem.io/addon-background.jpg",
-    description: `Source: ${channel.source}\nCategories: ${(
-      channel.categories || []
-    ).join(", ")}`,
-  };
-
-  return { meta };
-});
-
-// === STREAM HANDLER ===
-builder.defineStreamHandler(async ({ id }) => {
-  console.log("Stream request for:", id);
-
-  const masterChannelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
-  const channel = masterChannelList.find((c) => c.id === id);
-
-  if (!channel || !channel.streams || channel.streams.length === 0) {
-    return { streams: [] };
-  }
-
-  // Sort streams to put 'verified' ones first.
-  const sortedStreams = [...channel.streams].sort((a, b) => {
-    if (a.health === "verified" && b.health !== "verified") return -1;
-    if (a.health !== "verified" && b.health === "verified") return 1;
-    return 0;
   });
 
-  const streams = sortedStreams.map((stream) => {
-    const streamObj = {
-      url: stream.url,
-      title: `${
-        stream.health === "verified"
-          ? "✅"
-          : stream.health === "failed"
-          ? "❌"
-          : "❔"
-      } Verified Source`,
-    };
+  // === CATALOG HANDLER ===
+  builder.defineCatalogHandler(async ({ type, id, extra }) => {
+    console.log("Catalog request:", { type, id, extra });
 
-    // Add headers if they exist
-    if (stream.user_agent || stream.referrer) {
-      streamObj.behaviorHints = {
-        headers: {},
-      };
-      if (stream.user_agent) {
-        streamObj.behaviorHints.headers["User-Agent"] = stream.user_agent;
-      }
-      if (stream.referrer) {
-        streamObj.behaviorHints.headers["Referer"] = stream.referrer;
-      }
+    if (type !== "tv" || id !== "tvmux-main-catalog") {
+      return Promise.resolve({ metas: [] });
     }
 
-    return streamObj;
+    const masterChannelList =
+      (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+    if (masterChannelList.length === 0) {
+      return Promise.resolve({ metas: [] });
+    }
+
+    const selectedGenre = extra?.genre;
+    const filteredList =
+      selectedGenre && selectedGenre !== "All"
+        ? masterChannelList.filter(
+            (c) =>
+              c.source === selectedGenre || c.country?.name === selectedGenre
+          )
+        : masterChannelList;
+
+    const metas = filteredList.map((channel) => ({
+      id: channel.id,
+      type: "tv",
+      name: channel.name,
+      poster: channel.logo,
+      posterShape: "square",
+    }));
+
+    return Promise.resolve({ metas });
   });
 
-  return { streams };
-});
+  // === META HANDLER ===
+  builder.defineMetaHandler(async ({ id }) => {
+    console.log("Meta request for:", id);
 
-// This is the main serverless function entry point for Vercel
+    const masterChannelList =
+      (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+    const channel = masterChannelList.find((c) => c.id === id);
+
+    if (!channel) {
+      return Promise.resolve({ meta: null });
+    }
+
+    const meta = {
+      id: channel.id,
+      type: "tv",
+      name: channel.name,
+      poster: channel.logo,
+      posterShape: "square",
+      logo: channel.logo,
+      background: "https://dl.strem.io/addon-background.jpg",
+      description: `Source: ${channel.source}\nCategories: ${(
+        channel.categories || []
+      ).join(", ")}`,
+    };
+
+    return Promise.resolve({ meta });
+  });
+
+  // === STREAM HANDLER ===
+  builder.defineStreamHandler(async ({ id }) => {
+    console.log("Stream request for:", id);
+
+    const masterChannelList =
+      (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+    const channel = masterChannelList.find((c) => c.id === id);
+
+    if (!channel || !channel.streams || channel.streams.length === 0) {
+      return Promise.resolve({ streams: [] });
+    }
+
+    const sortedStreams = [...channel.streams].sort((a, b) => {
+      if (a.health === "verified" && b.health !== "verified") return -1;
+      if (a.health !== "verified" && b.health === "verified") return 1;
+      return 0;
+    });
+
+    const streams = sortedStreams.map((stream) => {
+      const streamObj = {
+        url: stream.url,
+        title: `${
+          stream.health === "verified" ? "✅ Verified" : "❔ Untested"
+        }`,
+      };
+
+      if (stream.user_agent || stream.referrer) {
+        streamObj.behaviorHints = { headers: {} };
+        if (stream.user_agent) {
+          streamObj.behaviorHints.headers["User-Agent"] = stream.user_agent;
+        }
+        if (stream.referrer) {
+          streamObj.behaviorHints.headers["Referer"] = stream.referrer;
+        }
+      }
+      return streamObj;
+    });
+
+    return Promise.resolve({ streams });
+  });
+
+  return builder.getInterface();
+}
+
+/**
+ * The main serverless function handler for Vercel.
+ */
 export default async function handler(req, res) {
   // Set CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Cache-Control", `public, max-age=${CACHE_MAX_AGE}`);
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  // Handle favicon.ico to prevent 404 errors in logs
+  if (url.pathname === "/favicon.ico") {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  // Serve a simple landing page for the root
+  if (url.pathname === "/") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(
+      "<h1>TVMux Stremio Addon</h1><p>Addon is running. Add the manifest.json URL to Stremio.</p>"
+    );
+    return;
+  }
+
+  // Create the addon interface on-the-fly and let the SDK handle the request
   try {
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const pathname = url.pathname;
-
-    console.log(`Request: ${req.method} ${pathname}`);
-
-    // Handle manifest.json - use dynamic manifest
-    if (pathname === "/manifest.json" || pathname === "/") {
-      const manifest = await getDynamicManifest();
-      return res.status(200).json(manifest);
-    }
-
-    // For all other routes, use the SDK's built-in router
-    const addonInterface = builder.getInterface();
-
-    // The SDK creates handlers in the 'get' object
-    if (addonInterface.get && addonInterface.get[pathname]) {
-      const handler = addonInterface.get[pathname];
-      const query = Object.fromEntries(url.searchParams.entries());
-
-      try {
-        const result = await handler(query);
-        return res.status(200).json(result);
-      } catch (handlerError) {
-        console.error("Handler error:", handlerError);
-        return res.status(500).json({
-          error: "Handler error",
-          details: handlerError.message,
-        });
-      }
-    }
-
-    // If no handler found, return 404
-    return res.status(404).json({ error: "Not found" });
-  } catch (error) {
-    console.error("Main handler error:", error);
-    return res
-      .status(500)
-      .json({ error: "Internal server error", details: error.message });
+    const addonInterface = await getAddonInterface();
+    res.setHeader(
+      "Cache-Control",
+      `public, max-age=${CACHE_MAX_AGE}, stale-while-revalidate=${
+        CACHE_MAX_AGE * 2
+      }`
+    );
+    serveHTTP(addonInterface, req, res);
+  } catch (err) {
+    console.error("Error in main handler:", err);
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Internal Server Error" }));
   }
 }
