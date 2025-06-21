@@ -57,11 +57,15 @@ async function getDynamicManifest() {
   }
 
   const availableCatalogs = (await getFromCache(AVAILABLE_CATALOGS_KEY)) || [];
-  const baseManifest = builder.getInterface();
 
-  // Create a new manifest with dynamic catalogs, preserving all required fields
+  // Create the manifest object directly, don't use builder.getInterface()
   const manifest = {
-    ...baseManifest,
+    id: "com.tvmux.addon",
+    version: "1.0.0",
+    name: "TVMux",
+    description: "Resilient IPTV addon sourcing from public and custom lists.",
+    resources: ["catalog", "meta", "stream"],
+    types: ["tv"],
     catalogs: [
       {
         type: "tv",
@@ -76,6 +80,11 @@ async function getDynamicManifest() {
         ],
       },
     ],
+    idPrefixes: ["tvmux_"],
+    behaviorHints: {
+      configurable: true,
+      configurationRequired: false,
+    },
   };
 
   manifestCache = manifest;
