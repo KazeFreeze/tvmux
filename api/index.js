@@ -21,6 +21,7 @@ async function getAddon() {
   console.log("GETADDON: Starting addon creation...");
   const getCatalogsStart = Date.now();
 
+  // We still fetch the catalogs to know they exist, but we won't put them in the manifest.
   const availableCatalogs = (await getFromCache(AVAILABLE_CATALOGS_KEY)) || [];
   console.log(
     `GETADDON: Fetched available catalogs in ${
@@ -30,7 +31,7 @@ async function getAddon() {
 
   const builder = new addonBuilder({
     id: "com.tvmux.addon",
-    version: "1.0.6", // Bump version for final diagnostics
+    version: "1.0.7", // Bump version to signify the fix
     name: "TVMux",
     description: "Resilient IPTV addon sourcing from public and custom lists.",
     resources: ["catalog", "meta", "stream"],
@@ -43,11 +44,9 @@ async function getAddon() {
         extra: [
           {
             name: "genre",
-            options:
-              availableCatalogs.length > 0
-                ? ["All", ...availableCatalogs]
-                : ["All"],
-            isRequired: false,
+            // By removing the 'options' array, we default to a text input.
+            // This avoids creating a massive manifest that causes the SDK to hang.
+            // isRequired: false, // This is now implicit
           },
         ],
       },
