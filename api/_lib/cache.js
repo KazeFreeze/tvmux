@@ -41,5 +41,29 @@ export async function setInCache(key, value, options = {}) {
     await kv.set(key, value, { ...defaultOptions, ...options });
   } catch (error) {
     console.error(`Error setting key "${key}" in Vercel KV:`, error);
+    // Throw the error to allow the caller to handle it, e.g., in a Promise.allSettled
+    throw error;
   }
 }
+
+// --- START OF NEW CODE ---
+/**
+ * Stores multiple key-value pairs in the Vercel KV store in a single, efficient command.
+ * @param {object} items - An object where keys are the cache keys and values are the items to store.
+ * @returns {Promise<void>}
+ */
+export async function setMultipleInCache(items) {
+  // Do nothing if there are no items to set.
+  if (!items || Object.keys(items).length === 0) {
+    return;
+  }
+  try {
+    // kv.mset is highly efficient for batch writes.
+    await kv.mset(items);
+  } catch (error) {
+    console.error(`Error performing mset in Vercel KV:`, error);
+    // Propagate the error so the background job knows the batch write failed.
+    throw error;
+  }
+}
+// --- END OF NEW CODE ---
