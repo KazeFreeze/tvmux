@@ -59,7 +59,7 @@ async function getDynamicManifest() {
   const availableCatalogs = (await getFromCache(AVAILABLE_CATALOGS_KEY)) || [];
   const baseManifest = builder.getInterface();
 
-  // Create a new manifest with dynamic catalogs
+  // Create a new manifest with dynamic catalogs, preserving all required fields
   const manifest = {
     ...baseManifest,
     catalogs: [
