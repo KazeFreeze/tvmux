@@ -5,14 +5,12 @@
  * It is architected to be stateless and serverless-safe.
  */
 
-import { addonBuilder } from "stremio-addon-sdk";
+import { addonBuilder, serveHTTP } from "stremio-addon-sdk";
 import {
   getFromCache,
   MASTER_CHANNEL_LIST_KEY,
   AVAILABLE_CATALOGS_KEY,
 } from "./_lib/cache.js";
-
-const CACHE_MAX_AGE = 60 * 5; // 5 minutes in seconds
 
 /**
  * Creates and configures a new Stremio addon instance with dynamic data.
@@ -23,7 +21,7 @@ async function getAddon() {
 
   const builder = new addonBuilder({
     id: "com.tvmux.addon",
-    version: "1.0.2", // Bump version to signify this fix
+    version: "1.0.3", // Bump version to signify this fix
     name: "TVMux",
     description: "Resilient IPTV addon sourcing from public and custom lists.",
     resources: ["catalog", "meta", "stream"],
@@ -58,16 +56,15 @@ async function getAddon() {
     const { type, id, extra } = args;
 
     if (type !== "tv" || id !== "tvmux-main-catalog") {
-      return { metas: [] };
+      return Promise.resolve({ metas: [] });
     }
 
     const masterChannelList =
       (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
     if (masterChannelList.length === 0) {
-      return { metas: [] };
+      return Promise.resolve({ metas: [] });
     }
 
-    // This logic works correctly now that 'extra' is an object.
     const selectedGenre = extra?.genre;
     const filteredList =
       selectedGenre && selectedGenre !== "All"
@@ -85,7 +82,7 @@ async function getAddon() {
       posterShape: "square",
     }));
 
-    return { metas };
+    return Promise.resolve({ metas });
   });
 
   // META HANDLER
@@ -97,9 +94,9 @@ async function getAddon() {
       (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
     const channel = masterChannelList.find((c) => c.id === id);
 
-    if (!channel) return { meta: null };
+    if (!channel) return Promise.resolve({ meta: null });
 
-    return {
+    return Promise.resolve({
       meta: {
         id: channel.id,
         type: "tv",
@@ -112,7 +109,7 @@ async function getAddon() {
           channel.categories || []
         ).join(", ")}`,
       },
-    };
+    });
   });
 
   // STREAM HANDLER
@@ -125,7 +122,7 @@ async function getAddon() {
     const channel = masterChannelList.find((c) => c.id === id);
 
     if (!channel || !channel.streams || channel.streams.length === 0) {
-      return { streams: [] };
+      return Promise.resolve({ streams: [] });
     }
 
     const sortedStreams = [...channel.streams].sort((a, b) => {
@@ -151,7 +148,7 @@ async function getAddon() {
       return streamObj;
     });
 
-    return { streams };
+    return Promise.resolve({ streams });
   });
 
   return builder.getInterface();
@@ -161,71 +158,17 @@ async function getAddon() {
  * The main serverless function handler for Vercel.
  */
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Content-Type", "application/json");
-  res.setHeader(
-    "Cache-Control",
-    `public, max-age=${CACHE_MAX_AGE}, stale-while-revalidate=${
-      CACHE_MAX_AGE * 2
-    }`
-  );
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const path = url.pathname;
-
-  console.log(`Handling request: ${path}`);
-
-  if (path === "/favicon.ico") {
-    return res.status(204).end();
-  }
-
+  // FIX: Use the official 'serveHTTP' function from the SDK.
+  // This is the recommended and most robust way to create a Stremio addon server.
+  // It handles all routing, request parsing, and response writing automatically,
+  // preventing subtle bugs that can occur with manual implementations.
   try {
     const addonInterface = await getAddon();
-    let result;
-
-    if (path === "/manifest.json" || path === "/") {
-      result = addonInterface.manifest;
-    } else if (path.startsWith("/catalog/")) {
-      const [, , type, id, extraString] = path.replace(".json", "").split("/");
-
-      // FIX: The 'extra' property must be an object, not a string.
-      // We parse the URL segment (which is formatted like a query string)
-      // into a key-value object that the handler expects.
-      const extra = extraString
-        ? Object.fromEntries(new URLSearchParams(extraString))
-        : null;
-
-      result = await addonInterface.catalog.get({
-        type,
-        id,
-        extra, // Pass the correctly parsed object
-      });
-    } else if (path.startsWith("/meta/")) {
-      const [, , type, id] = path.replace(".json", "").split("/");
-      result = await addonInterface.meta.get({ type, id });
-    } else if (path.startsWith("/stream/")) {
-      const [, , type, id] = path.replace(".json", "").split("/");
-      result = await addonInterface.stream.get({ type, id });
-    } else if (path === "/configure") {
-      res.writeHead(200, { "Content-Type": "text/html" });
-      return res.end(
-        "<h1>Configuration is handled automatically in Stremio.</h1>"
-      );
-    } else {
-      res.writeHead(404);
-      return res.end(JSON.stringify({ error: "Not Found" }));
-    }
-
-    res.writeHead(200);
-    res.end(JSON.stringify(result));
+    serveHTTP(addonInterface, { req, res });
   } catch (err) {
-    console.error("Handler error:", err);
+    // This will catch errors that happen during addonInterface creation.
+    // Errors during request handling are managed internally by serveHTTP.
+    console.error("Handler initialization error:", err);
     res.writeHead(500);
     res.end(
       JSON.stringify({ error: "Internal Server Error", detail: err.message })
