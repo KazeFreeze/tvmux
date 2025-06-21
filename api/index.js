@@ -9,7 +9,7 @@ import pkg from "stremio-addon-sdk";
 const { addonBuilder, serveHTTP } = pkg;
 import {
   getFromCache,
-  MASTER_CHANNEL_LIST_KEY, // Still used for meta/stream lookups
+  MASTER_CHANNEL_LIST_KEY,
   AVAILABLE_CATALOGS_KEY,
 } from "./_lib/cache.js";
 
@@ -22,7 +22,7 @@ async function getAddon() {
 
   const builder = new addonBuilder({
     id: "com.tvmux.addon",
-    version: "1.0.4", // Bump version to signify optimization
+    version: "1.0.5", // Bump version for debugging
     name: "TVMux",
     description: "Resilient IPTV addon sourcing from public and custom lists.",
     resources: ["catalog", "meta", "stream"],
@@ -51,35 +51,79 @@ async function getAddon() {
     },
   });
 
-  // CATALOG HANDLER (OPTIMIZED)
+  // CATALOG HANDLER (WITH ENHANCED DEBUGGING)
   builder.defineCatalogHandler(async (args) => {
-    console.log("Catalog request:", args);
+    const requestStartTime = Date.now();
+    console.log(
+      "CATALOG HANDLER: Received request.",
+      JSON.stringify(args, null, 2)
+    );
+
     const { type, id, extra } = args;
 
     if (type !== "tv" || id !== "tvmux-main-catalog") {
+      console.log("CATALOG HANDLER: Exiting, invalid type/id.");
       return Promise.resolve({ metas: [] });
     }
 
     const selectedGenre = extra?.genre;
+    console.log(`CATALOG HANDLER: Parsed selectedGenre as: '${selectedGenre}'`);
+
     let channelList = [];
 
-    // If a specific genre is selected, fetch only that pre-filtered list.
-    // This is much faster than loading the entire master list.
     if (selectedGenre && selectedGenre !== "All") {
-      console.log(`Fetching optimized catalog for genre: ${selectedGenre}`);
+      // FAST PATH
       const cacheKey = `catalog_${selectedGenre}`;
-      channelList = (await getFromCache(cacheKey)) || [];
+      console.log(
+        `CATALOG HANDLER: Taking FAST PATH. Fetching from cache key: '${cacheKey}'`
+      );
+      try {
+        const fetchStartTime = Date.now();
+        channelList = (await getFromCache(cacheKey)) || [];
+        console.log(
+          `CATALOG HANDLER: FAST PATH fetch complete in ${
+            Date.now() - fetchStartTime
+          }ms. Found ${channelList.length} channels.`
+        );
+      } catch (e) {
+        console.error(
+          `CATALOG HANDLER: FAST PATH ERROR fetching from cache.`,
+          e
+        );
+        return Promise.resolve({ metas: [] });
+      }
     } else {
-      // Fallback to the full list for "All" or default view. This will still be slow.
-      console.log('Fetching master channel list for "All" genre...');
-      channelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+      // SLOW PATH
+      console.log(
+        `CATALOG HANDLER: Taking SLOW PATH for genre '${selectedGenre}'. Fetching master list.`
+      );
+      try {
+        const fetchStartTime = Date.now();
+        channelList = (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
+        console.log(
+          `CATALOG HANDLER: SLOW PATH fetch complete in ${
+            Date.now() - fetchStartTime
+          }ms. Found ${channelList.length} channels.`
+        );
+      } catch (e) {
+        console.error(
+          `CATALOG HANDLER: SLOW PATH ERROR fetching from cache.`,
+          e
+        );
+        return Promise.resolve({ metas: [] });
+      }
     }
 
     if (channelList.length === 0) {
-      console.warn(`No channels found for genre: ${selectedGenre || "All"}`);
+      console.warn(
+        `CATALOG HANDLER: No channels found for genre: '${
+          selectedGenre || "All"
+        }'`
+      );
       return Promise.resolve({ metas: [] });
     }
 
+    const mapStartTime = Date.now();
     const metas = channelList.map((channel) => ({
       id: channel.id,
       type: "tv",
@@ -87,12 +131,19 @@ async function getAddon() {
       poster: channel.logo,
       posterShape: "square",
     }));
+    console.log(
+      `CATALOG HANDLER: Mapping to metas took ${Date.now() - mapStartTime}ms.`
+    );
 
+    console.log(
+      `CATALOG HANDLER: Responding with ${metas.length} metas. Total time: ${
+        Date.now() - requestStartTime
+      }ms.`
+    );
     return Promise.resolve({ metas });
   });
 
   // META HANDLER (Unchanged)
-  // This still relies on the master list for individual lookups, which is acceptable.
   builder.defineMetaHandler(async (args) => {
     console.log("Meta request for:", args);
     const { id } = args;
