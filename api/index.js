@@ -5,7 +5,8 @@
  * It is architected to be stateless and serverless-safe.
  */
 
-import { addonBuilder, serveHTTP } from "stremio-addon-sdk";
+import pkg from "stremio-addon-sdk";
+const { addonBuilder, serveHTTP } = pkg;
 import {
   getFromCache,
   MASTER_CHANNEL_LIST_KEY,
