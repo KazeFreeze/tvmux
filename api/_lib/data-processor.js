@@ -10,6 +10,17 @@
 
 import parser from "iptv-playlist-parser";
 import httpClient from "./httpClient.js";
+import axios from "axios";
+
+// Create a separate HTTP client with longer timeout for background processing
+const backgroundHttpClient = axios.create({
+  timeout: 60000, // 60 seconds for background jobs
+  maxContentLength: 50485760, // 50MB for large API responses
+  maxRedirects: 0,
+  validateStatus: function (status) {
+    return status >= 200 && status < 300;
+  },
+});
 
 const IPTV_ORG_API_URL = "https://iptv-org.github.io/api";
 const DEFAULT_LOGO =
@@ -40,7 +51,7 @@ function normalizeChannel(channel, sourceName, index) {
 
   return {
     // Create a unique ID to prevent collisions between sources
-    id: `${sourceName.toLowerCase().replace(/\s/g, "-")}_${
+    id: `tvmux_${sourceName.toLowerCase().replace(/\s/g, "-")}_${
       channel.id || index
     }`,
     name,
@@ -59,65 +70,88 @@ function normalizeChannel(channel, sourceName, index) {
  */
 export async function processIptvOrgSource() {
   console.log("Starting iptv-org data processing...");
-  const [channelsRes, streamsRes, countriesRes, categoriesRes, blocklistRes] =
-    await Promise.all([
-      httpClient.get(`${IPTV_ORG_API_URL}/channels.json`),
-      httpClient.get(`${IPTV_ORG_API_URL}/streams.json`),
-      httpClient.get(`${IPTV_ORG_API_URL}/countries.json`),
-      httpClient.get(`${IPTV_ORG_API_URL}/categories.json`),
-      httpClient.get(`${IPTV_ORG_API_URL}/blocklist.json`),
-    ]);
 
-  const channels = channelsRes.data;
-  const streams = streamsRes.data;
-  const countries = new Map(countriesRes.data.map((c) => [c.code, c]));
-  const categories = new Map(categoriesRes.data.map((c) => [c.id, c.name]));
-  const blocklist = new Set(blocklistRes.data.map((item) => item.channel));
+  try {
+    // Use the background HTTP client with longer timeout
+    const [channelsRes, streamsRes, countriesRes, categoriesRes, blocklistRes] =
+      await Promise.all([
+        backgroundHttpClient.get(`${IPTV_ORG_API_URL}/channels.json`),
+        backgroundHttpClient.get(`${IPTV_ORG_API_URL}/streams.json`),
+        backgroundHttpClient.get(`${IPTV_ORG_API_URL}/countries.json`),
+        backgroundHttpClient.get(`${IPTV_ORG_API_URL}/categories.json`),
+        backgroundHttpClient.get(`${IPTV_ORG_API_URL}/blocklist.json`),
+      ]);
 
-  console.log(
-    `Fetched ${channels.length} channels, ${streams.length} streams from iptv-org.`
-  );
+    const channels = channelsRes.data;
+    const streams = streamsRes.data;
+    const countries = new Map(countriesRes.data.map((c) => [c.code, c]));
+    const categories = new Map(categoriesRes.data.map((c) => [c.id, c.name]));
+    const blocklist = new Set(blocklistRes.data.map((item) => item.channel));
 
-  // Create a map for efficient stream lookups
-  const streamsByChannel = new Map();
-  for (const stream of streams) {
-    if (!streamsByChannel.has(stream.channel)) {
-      streamsByChannel.set(stream.channel, []);
-    }
-    streamsByChannel.get(stream.channel).push({
-      url: stream.url,
-      user_agent: stream.user_agent,
-      referrer: stream.referrer,
-      quality: stream.quality,
-      status: stream.status,
-    });
-  }
-
-  const processedChannels = [];
-  for (const channel of channels) {
-    // Honor the blocklist
-    if (blocklist.has(channel.id)) continue;
-
-    const channelStreams = streamsByChannel.get(channel.id) || [];
-    if (channelStreams.length === 0) continue; // Skip channels with no streams
-
-    const enrichedChannel = {
-      ...channel,
-      country: countries.get(channel.country) || { name: channel.country },
-      categories: (channel.categories || []).map(
-        (catId) => categories.get(catId) || catId
-      ),
-      streams: channelStreams,
-    };
-
-    processedChannels.push(
-      normalizeChannel(enrichedChannel, "iptv-org", channel.id)
+    console.log(
+      `Fetched ${channels.length} channels, ${streams.length} streams from iptv-org.`
     );
+
+    // Validate that we got meaningful data
+    if (!Array.isArray(channels) || channels.length === 0) {
+      throw new Error("No channels received from iptv-org API");
+    }
+    if (!Array.isArray(streams) || streams.length === 0) {
+      throw new Error("No streams received from iptv-org API");
+    }
+
+    // Create a map for efficient stream lookups
+    const streamsByChannel = new Map();
+    for (const stream of streams) {
+      if (!streamsByChannel.has(stream.channel)) {
+        streamsByChannel.set(stream.channel, []);
+      }
+      streamsByChannel.get(stream.channel).push({
+        url: stream.url,
+        user_agent: stream.user_agent,
+        referrer: stream.referrer,
+        quality: stream.quality,
+        status: stream.status,
+      });
+    }
+
+    const processedChannels = [];
+    for (const channel of channels) {
+      // Honor the blocklist
+      if (blocklist.has(channel.id)) continue;
+
+      const channelStreams = streamsByChannel.get(channel.id) || [];
+      if (channelStreams.length === 0) continue; // Skip channels with no streams
+
+      const enrichedChannel = {
+        ...channel,
+        country: countries.get(channel.country) || {
+          name: channel.country || "Unknown",
+        },
+        categories: (channel.categories || []).map(
+          (catId) => categories.get(catId) || catId
+        ),
+        streams: channelStreams,
+      };
+
+      processedChannels.push(
+        normalizeChannel(enrichedChannel, "iptv-org", channel.id)
+      );
+    }
+
+    console.log(
+      `Finished processing iptv-org. Found ${processedChannels.length} valid channels.`
+    );
+
+    if (processedChannels.length === 0) {
+      throw new Error("No valid channels after processing iptv-org data");
+    }
+
+    return processedChannels;
+  } catch (error) {
+    console.error("Error processing iptv-org source:", error);
+    throw new Error(`iptv-org processing failed: ${error.message}`);
   }
-  console.log(
-    `Finished processing iptv-org. Found ${processedChannels.length} valid channels.`
-  );
-  return processedChannels;
 }
 
 /**
@@ -127,18 +161,37 @@ export async function processIptvOrgSource() {
  */
 export async function processCustomM3uSource(source) {
   console.log(`Processing custom M3U source: ${source.name}`);
-  const response = await httpClient.get(source.url);
-  const playlistContent = response.data;
-  const result = parser.parse(playlistContent);
 
-  const processedChannels = result.items
-    .map((channel, index) => normalizeChannel(channel, source.name, index))
-    .filter((c) => c.streams.length > 0);
+  try {
+    // Use background HTTP client for custom sources too
+    const response = await backgroundHttpClient.get(source.url);
+    const playlistContent = response.data;
 
-  console.log(
-    `Finished processing ${source.name}. Found ${processedChannels.length} valid channels.`
-  );
-  return processedChannels;
+    if (!playlistContent || typeof playlistContent !== "string") {
+      throw new Error("Invalid or empty playlist content");
+    }
+
+    const result = parser.parse(playlistContent);
+
+    if (!result || !Array.isArray(result.items)) {
+      throw new Error("Failed to parse M3U playlist");
+    }
+
+    const processedChannels = result.items
+      .map((channel, index) => normalizeChannel(channel, source.name, index))
+      .filter((c) => c.streams.length > 0);
+
+    console.log(
+      `Finished processing ${source.name}. Found ${processedChannels.length} valid channels.`
+    );
+
+    return processedChannels;
+  } catch (error) {
+    console.error(`Error processing custom M3U source ${source.name}:`, error);
+    throw new Error(
+      `Custom M3U processing failed for ${source.name}: ${error.message}`
+    );
+  }
 }
 
 /**
@@ -159,7 +212,7 @@ export async function probeStreamHealth(masterChannelList, sampleSize = 50) {
 
   const healthChecks = sample.map(async (stream) => {
     try {
-      // Use a shorter timeout for health checks
+      // Use the regular httpClient for health checks (shorter timeout is fine)
       const response = await httpClient.head(stream.url, { timeout: 5000 });
       if (response.status >= 200 && response.status < 400) {
         stream.health = "verified";
