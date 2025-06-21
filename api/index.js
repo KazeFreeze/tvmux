@@ -2,11 +2,10 @@
  * @file api/index.js
  * @description The User-Facing API (Stremio Handlers).
  * This serverless function responds to requests from the Stremio application.
- * It is architected to be stateless, dynamically building the addon interface
- * on each request using data from the Vercel KV cache.
+ * It is architected to be stateless and serverless-safe.
  */
 
-import { addonBuilder, serveHTTP } from "stremio-addon-sdk";
+import { addonBuilder } from "stremio-addon-sdk";
 import {
   getFromCache,
   MASTER_CHANNEL_LIST_KEY,
@@ -16,17 +15,15 @@ import {
 const CACHE_MAX_AGE = 60 * 5; // 5 minutes in seconds
 
 /**
- * Creates and configures the Stremio addon interface.
- * This function is called on every request to ensure the addon's catalog
- * (genres/countries) is always up-to-date from the KV cache.
- * @returns {Promise<object>} A promise that resolves to a Stremio addon interface.
+ * Creates and configures a new Stremio addon instance with dynamic data.
+ * @returns {Promise<object>} A promise resolving to a Stremio addon instance.
  */
-async function getAddonInterface() {
+async function getAddon() {
   const availableCatalogs = (await getFromCache(AVAILABLE_CATALOGS_KEY)) || [];
 
   const builder = new addonBuilder({
     id: "com.tvmux.addon",
-    version: "1.0.1", // Bump version to signify update
+    version: "1.0.2", // Bump version to signify this fix
     name: "TVMux",
     description: "Resilient IPTV addon sourcing from public and custom lists.",
     resources: ["catalog", "meta", "stream"],
@@ -55,18 +52,19 @@ async function getAddonInterface() {
     },
   });
 
-  // === CATALOG HANDLER ===
-  builder.defineCatalogHandler(async ({ type, id, extra }) => {
-    console.log("Catalog request:", { type, id, extra });
+  // CATALOG HANDLER
+  builder.defineCatalogHandler(async (args) => {
+    console.log("Catalog request:", args);
+    const { type, id, extra } = args;
 
     if (type !== "tv" || id !== "tvmux-main-catalog") {
-      return Promise.resolve({ metas: [] });
+      return { metas: [] };
     }
 
     const masterChannelList =
       (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
     if (masterChannelList.length === 0) {
-      return Promise.resolve({ metas: [] });
+      return { metas: [] };
     }
 
     const selectedGenre = extra?.genre;
@@ -86,52 +84,52 @@ async function getAddonInterface() {
       posterShape: "square",
     }));
 
-    return Promise.resolve({ metas });
+    return { metas };
   });
 
-  // === META HANDLER ===
-  builder.defineMetaHandler(async ({ id }) => {
-    console.log("Meta request for:", id);
+  // META HANDLER
+  builder.defineMetaHandler(async (args) => {
+    console.log("Meta request for:", args);
+    const { id } = args;
 
     const masterChannelList =
       (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
     const channel = masterChannelList.find((c) => c.id === id);
 
-    if (!channel) {
-      return Promise.resolve({ meta: null });
-    }
+    if (!channel) return { meta: null };
 
-    const meta = {
-      id: channel.id,
-      type: "tv",
-      name: channel.name,
-      poster: channel.logo,
-      posterShape: "square",
-      logo: channel.logo,
-      background: "https://dl.strem.io/addon-background.jpg",
-      description: `Source: ${channel.source}\nCategories: ${(
-        channel.categories || []
-      ).join(", ")}`,
+    return {
+      meta: {
+        id: channel.id,
+        type: "tv",
+        name: channel.name,
+        poster: channel.logo,
+        posterShape: "square",
+        logo: channel.logo,
+        background: "https://dl.strem.io/addon-background.jpg",
+        description: `Source: ${channel.source}\nCategories: ${(
+          channel.categories || []
+        ).join(", ")}`,
+      },
     };
-
-    return Promise.resolve({ meta });
   });
 
-  // === STREAM HANDLER ===
-  builder.defineStreamHandler(async ({ id }) => {
-    console.log("Stream request for:", id);
+  // STREAM HANDLER
+  builder.defineStreamHandler(async (args) => {
+    console.log("Stream request for:", args);
+    const { id } = args;
 
     const masterChannelList =
       (await getFromCache(MASTER_CHANNEL_LIST_KEY)) || [];
     const channel = masterChannelList.find((c) => c.id === id);
 
     if (!channel || !channel.streams || channel.streams.length === 0) {
-      return Promise.resolve({ streams: [] });
+      return { streams: [] };
     }
 
     const sortedStreams = [...channel.streams].sort((a, b) => {
       if (a.health === "verified" && b.health !== "verified") return -1;
-      if (a.health !== "verified" && b.health === "verified") return 1;
+      if (b.health === "verified" && a.health !== "verified") return 1;
       return 0;
     });
 
@@ -142,20 +140,17 @@ async function getAddonInterface() {
           stream.health === "verified" ? "✅ Verified" : "❔ Untested"
         }`,
       };
-
       if (stream.user_agent || stream.referrer) {
         streamObj.behaviorHints = { headers: {} };
-        if (stream.user_agent) {
+        if (stream.user_agent)
           streamObj.behaviorHints.headers["User-Agent"] = stream.user_agent;
-        }
-        if (stream.referrer) {
+        if (stream.referrer)
           streamObj.behaviorHints.headers["Referer"] = stream.referrer;
-        }
       }
       return streamObj;
     });
 
-    return Promise.resolve({ streams });
+    return { streams };
   });
 
   return builder.getInterface();
@@ -165,45 +160,66 @@ async function getAddonInterface() {
  * The main serverless function handler for Vercel.
  */
 export default async function handler(req, res) {
-  // Set CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Content-Type", "application/json");
+  res.setHeader(
+    "Cache-Control",
+    `public, max-age=${CACHE_MAX_AGE}, stale-while-revalidate=${
+      CACHE_MAX_AGE * 2
+    }`
+  );
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
   const url = new URL(req.url, `http://${req.headers.host}`);
+  const path = url.pathname;
 
-  // Handle favicon.ico to prevent 404 errors in logs
-  if (url.pathname === "/favicon.ico") {
-    res.writeHead(204);
-    return res.end();
+  console.log(`Handling request: ${path}`);
+
+  if (path === "/favicon.ico") {
+    return res.status(204).end();
   }
 
-  // Serve a simple landing page for the root
-  if (url.pathname === "/") {
-    res.writeHead(200, { "Content-Type": "text/html" });
-    res.end(
-      "<h1>TVMux Stremio Addon</h1><p>Addon is running. Add the manifest.json URL to Stremio.</p>"
-    );
-    return;
-  }
-
-  // Create the addon interface on-the-fly and let the SDK handle the request
   try {
-    const addonInterface = await getAddonInterface();
-    res.setHeader(
-      "Cache-Control",
-      `public, max-age=${CACHE_MAX_AGE}, stale-while-revalidate=${
-        CACHE_MAX_AGE * 2
-      }`
-    );
-    serveHTTP(addonInterface, req, res);
+    const addonInterface = await getAddon();
+    let result;
+
+    if (path === "/manifest.json" || path === "/") {
+      result = addonInterface.manifest;
+    } else if (path.startsWith("/catalog/")) {
+      const [, , type, id, extra] = path.replace(".json", "").split("/");
+      result = await addonInterface.catalog.get({
+        type,
+        id,
+        extra: extra ? new URLSearchParams(extra).toString() : null,
+      });
+    } else if (path.startsWith("/meta/")) {
+      const [, , type, id] = path.replace(".json", "").split("/");
+      result = await addonInterface.meta.get({ type, id });
+    } else if (path.startsWith("/stream/")) {
+      const [, , type, id] = path.replace(".json", "").split("/");
+      result = await addonInterface.stream.get({ type, id });
+    } else if (path === "/configure") {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      return res.end(
+        "<h1>Configuration is handled automatically in Stremio.</h1>"
+      );
+    } else {
+      res.writeHead(404);
+      return res.end(JSON.stringify({ error: "Not Found" }));
+    }
+
+    res.writeHead(200);
+    res.end(JSON.stringify(result));
   } catch (err) {
-    console.error("Error in main handler:", err);
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Internal Server Error" }));
+    console.error("Handler error:", err);
+    res.writeHead(500);
+    res.end(
+      JSON.stringify({ error: "Internal Server Error", detail: err.message })
+    );
   }
 }

@@ -1,30 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-   "rewrites": [
-    {
-      "source": "/manifest.json",
-      "destination": "/api/index.js"
-    },
-    {
-      "source": "/configure",
-      "destination": "/api/index.js"
-    },
-    {
-      "source": "/catalog/:type/:id.json",
-      "destination": "/api/index.js"
-    },
-    {
-      "source": "/catalog/:type/:id/:extra.json",
-      "destination": "/api/index.js"
-    },
-    {
-      "source": "/meta/:type/:id.json",
-      "destination": "/api/index.js"
-    },
-    {
-      "source": "/stream/:type/:id.json",
-      "destination": "/api/index.js"
-    }
+  "rewrites": [
+    { "source": "/manifest.json", "destination": "/api/index.js" },
+    { "source": "/configure", "destination": "/api/index.js" },
+    { "source": "/catalog/:type/:id.json", "destination": "/api/index.js" },
+    { "source": "/catalog/:type/:id/:extra.json", "destination": "/api/index.js" },
+    { "source": "/meta/:type/:id.json", "destination": "/api/index.js" },
+    { "source": "/stream/:type/:id.json", "destination": "/api/index.js" },
+    { "source": "/", "destination": "/api/index.js" }
   ],
   "crons": [
     {
