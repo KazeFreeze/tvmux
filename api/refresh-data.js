@@ -120,8 +120,6 @@ export default async function handler(request, response) {
     sortedCatalogs.forEach((catalog) => (channelsByCatalog[catalog] = []));
 
     masterChannelList.forEach((channel) => {
-      // Custom M3U sources use the source name as the catalog.
-      // iptv-org channels use their country name as the catalog.
       const catalogName = availableCatalogs.has(channel.source)
         ? channel.source
         : channel.country?.name;
@@ -129,7 +127,18 @@ export default async function handler(request, response) {
       if (catalogName && channelsByCatalog[catalogName]) {
         channelsByCatalog[catalogName].push(channel);
       }
+
+      // --- START OF CHANGE ---
+      // **NEW**: Cache each channel individually for fast meta/stream lookups.
+      // We prefix the key to avoid conflicts with other key types.
+      const individualChannelKey = `channel_${channel.id}`;
+      cachePromises.push(setInCache(individualChannelKey, channel));
+      // --- END OF CHANGE ---
     });
+
+    console.log(
+      `Added ${masterChannelList.length} individual channel cache promises.`
+    );
 
     console.log("Storing individual catalogs for performance...");
     for (const catalogName in channelsByCatalog) {
@@ -143,7 +152,7 @@ export default async function handler(request, response) {
       }
     }
 
-    // Store the master list (for meta/stream lookups) and the list of catalog names
+    // Store the master list (for backup/debugging) and the list of catalog names
     console.log(
       `Storing master list with ${masterChannelList.length} channels.`
     );
