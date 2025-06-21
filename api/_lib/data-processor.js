@@ -123,58 +123,58 @@ export async function processCustomM3uSource(source) {
 }
 
 /**
- * --- UPDATED HEALTH PROBE LOGIC ---
- * Performs a HEAD request to stream URLs to check their health and then filters
- * out channels that have no working streams.
+ * --- BATCHED HEALTH PROBE LOGIC ---
+ * Performs HEAD requests in batches to prevent overwhelming the serverless function.
+ * It then filters out channels that have no working streams.
  * @param {Array<object>} masterChannelList - The list of all channel objects.
  * @returns {Array<object>} The filtered list of channels with at least one healthy stream.
  */
 export async function probeAndFilterStreamHealth(masterChannelList) {
+  const allStreams = masterChannelList.flatMap((channel) => channel.streams);
   console.log(
-    `Probing health of streams from ${masterChannelList.length} channels...`
+    `Probing health of ${allStreams.length} streams from ${masterChannelList.length} channels...`
   );
 
-  // Create a flat list of all unique streams to probe.
-  const allStreams = [];
-  masterChannelList.forEach((channel) => {
-    channel.streams.forEach((stream) => {
-      allStreams.push(stream); // The stream object is shared, so updates will reflect everywhere.
-    });
-  });
-
-  // Use a smaller timeout for health checks to fail faster.
-  const PROBE_TIMEOUT = 5000; // 5 seconds
+  const PROBE_TIMEOUT = 5000; // 5 seconds per stream
+  const BATCH_SIZE = 200; // Number of streams to check concurrently
   let verifiedCount = 0;
   let failedCount = 0;
 
-  const healthChecks = allStreams.map(async (stream) => {
-    try {
-      const response = await httpClient.head(stream.url, {
-        timeout: PROBE_TIMEOUT,
-      });
-      // We consider any 2xx or 3xx status as "verified" since it's reachable.
-      if (response.status >= 200 && response.status < 400) {
-        stream.health = "verified";
-        verifiedCount++;
-      } else {
+  for (let i = 0; i < allStreams.length; i += BATCH_SIZE) {
+    const batch = allStreams.slice(i, i + BATCH_SIZE);
+    console.log(
+      `Probing batch ${i / BATCH_SIZE + 1}... (${batch.length} streams)`
+    );
+
+    const healthChecks = batch.map(async (stream) => {
+      try {
+        const response = await httpClient.head(stream.url, {
+          timeout: PROBE_TIMEOUT,
+        });
+        if (response.status >= 200 && response.status < 400) {
+          stream.health = "verified";
+        } else {
+          stream.health = "failed";
+        }
+      } catch (error) {
         stream.health = "failed";
-        failedCount++;
       }
-    } catch (error) {
-      stream.health = "failed";
-      failedCount++;
-    }
+    });
+
+    await Promise.allSettled(healthChecks);
+  }
+
+  // Tally the results after all batches are done
+  allStreams.forEach((stream) => {
+    if (stream.health === "verified") verifiedCount++;
+    else failedCount++;
   });
 
-  // Wait for all health checks to complete.
-  await Promise.allSettled(healthChecks);
   console.log(
     `Stream health probing complete. Verified: ${verifiedCount}, Failed: ${failedCount}.`
   );
 
-  // Now, filter the original master list.
   const healthyChannels = masterChannelList.filter((channel) => {
-    // Keep the channel if at least ONE of its streams is verified.
     const hasAtLeastOneVerifiedStream = channel.streams.some(
       (stream) => stream.health === "verified"
     );
